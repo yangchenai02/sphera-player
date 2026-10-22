@@ -7,6 +7,9 @@ export { PlaybackStateMachine } from './state';
 export type { StateChangeListener } from './state';
 export { SourceLoader, detectSourceKind, mapMediaError } from './source';
 export type { SourceKind, SourceTypeOverride } from './source';
+export { Equirect360Projection } from './projections/equirect360';
+export { createVideoSphere, disposeObjectTree, VIDEO_SPHERE_RADIUS } from './projections/base';
+export type { ProjectionStrategy, SphereOptions } from './projections/base';
 export type {
   HotspotDef,
   PlaybackState,

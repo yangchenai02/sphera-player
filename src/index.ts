@@ -1,6 +1,7 @@
 /** Sphera Player - an XR 360/VR video player built on three.js. */
 export const VERSION = '0.1.0';
 
+export { SpheraPlayer } from './player';
 export { Emitter } from './events';
 export type { EventHandler } from './events';
 export { PlaybackStateMachine } from './state';

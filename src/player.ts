@@ -11,7 +11,10 @@ import { DeviceOrientationControls } from './controls/device-orientation';
 import { XRSessionHelper } from './controls/xr-session';
 import { clampFov } from './controls/look-math';
 import { DomUI } from './ui/dom-ui';
+import { XRPanel, type XRPanelAction } from './ui/xr-panel';
+import { HotspotManager } from './hotspots';
 import type {
+  HotspotDef,
   PlaybackState,
   PlayerEventMap,
   ProjectionType,
@@ -29,11 +32,13 @@ const ALL_PROJECTIONS: ProjectionType[] = [
 
 /**
  * SpheraPlayer facade: wires the source loader, the active projection
- * strategy, look controls and the DOM UI into one embeddable player.
+ * strategy, look controls, the DOM UI, the in-VR panel and hotspots into
+ * one embeddable player.
  *
  * Scene layout: the camera sits at the origin inside a rig group (the rig
- * carries yaw/pitch from the look controls); the projection geometry lives
- * at the scene root, centered on the same origin.
+ * carries yaw/pitch from the look controls, and hosts the XR panel and
+ * controllers); the projection geometry and hotspots live at the scene
+ * root, centered on the same origin.
  */
 export class SpheraPlayer {
   private readonly events = new Emitter<PlayerEventMap>();
@@ -46,10 +51,13 @@ export class SpheraPlayer {
   private readonly source: SourceLoader;
   private readonly stateMachine: PlaybackStateMachine;
   private readonly ui: DomUI;
+  private readonly panel: XRPanel;
+  private readonly hotspots: HotspotManager;
   private readonly controls: PointerLookControls;
   private readonly gyro: DeviceOrientationControls;
   private readonly clock = new THREE.Clock();
   private readonly videoListeners: Array<[string, EventListener]> = [];
+  private readonly controllers: THREE.Object3D[] = [];
   private texture: THREE.VideoTexture;
   private strategy: ProjectionStrategy;
   private projectionGroup: THREE.Group | null = null;
@@ -76,6 +84,7 @@ export class SpheraPlayer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.xr.enabled = true;
     container.appendChild(this.renderer.domElement);
+    this.renderer.domElement.addEventListener('click', this.handleCanvasClick);
 
     this.camera = new THREE.PerspectiveCamera(clampFov(options.fov ?? 75), 1, 0.1, 100);
     this.rig.add(this.camera);
@@ -100,6 +109,16 @@ export class SpheraPlayer {
 
     this.controls = new PointerLookControls(this.rig, this.camera, this.renderer.domElement);
     this.gyro = new DeviceOrientationControls(this.rig);
+
+    this.panel = new XRPanel({ onAction: (action) => this.handlePanelAction(action) });
+    this.rig.add(this.panel.group);
+
+    this.hotspots = new HotspotManager(this.scene, (id, data) => {
+      this.events.emit('hotspotactivate', { id, data });
+    });
+    this.hotspots.addAll(options.hotspots ?? []);
+
+    this.setupControllers();
 
     this.ui = new DomUI(container, {
       onTogglePlay: () => this.togglePlay(),
@@ -232,6 +251,20 @@ export class SpheraPlayer {
     return true;
   }
 
+  // ----------------------------------------------------------- hotspots
+
+  addHotspot(def: HotspotDef): void {
+    this.hotspots.add(def);
+  }
+
+  removeHotspot(id: string): void {
+    this.hotspots.remove(id);
+  }
+
+  clearHotspots(): void {
+    this.hotspots.clear();
+  }
+
   // ------------------------------------------------------------ queries
 
   getState(): PlaybackState {
@@ -314,17 +347,77 @@ export class SpheraPlayer {
 
   // ---------------------------------------------------------------- XR
 
+  private setupControllers(): void {
+    for (let i = 0; i < 2; i++) {
+      const controller = this.renderer.xr.getController(i);
+      controller.addEventListener('selectstart', () => this.handleXRSelect(controller));
+      this.rig.add(controller);
+      this.controllers.push(controller);
+    }
+  }
+
+  private handleXRSelect(controller: THREE.Object3D): void {
+    if (this.panel.group.visible) {
+      const rotation = new THREE.Matrix4().extractRotation(controller.matrixWorld);
+      const raycaster = new THREE.Raycaster();
+      raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+      raycaster.ray.direction.set(0, 0, -1).applyMatrix4(rotation);
+      const hits = raycaster.intersectObjects(this.panel.raycastTargets(), false);
+      if (hits.length > 0 && this.panel.handleIntersect(hits[0].uv)) return;
+    }
+    this.hotspots.pickFromObject(controller);
+  }
+
+  private handlePanelAction(action: XRPanelAction): void {
+    switch (action) {
+      case 'toggle-play':
+        this.togglePlay();
+        break;
+      case 'seek-back':
+        this.seek(this.currentTime - 10);
+        break;
+      case 'seek-forward':
+        this.seek(this.currentTime + 10);
+        break;
+    }
+  }
+
+  private syncPanel(): void {
+    const video = this.source.video;
+    this.panel.setState({
+      playing: this.stateMachine.state === 'playing',
+      currentTime: video.currentTime || 0,
+      duration: video.duration || 0,
+    });
+  }
+
   private onXRStart(): void {
     this.strategy.setPresentation?.(this.camera, 'xr');
+    this.panel.setVisible(true);
+    this.syncPanel();
     this.events.emit('xrstart', undefined);
   }
 
   private onXREnd(): void {
     this.strategy.setPresentation?.(this.camera, 'flat');
+    this.panel.setVisible(false);
     this.events.emit('xrend', undefined);
   }
 
   // ------------------------------------------------------------- wiring
+
+  private handleCanvasClick = (e: MouseEvent): void => {
+    // A drag also ends in a click; only treat near-zero-movement clicks as
+    // hotspot taps.
+    if (this.controls.lastGestureDistance > 6) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.hotspots.pickFromCamera(this.camera, ndc);
+  };
 
   private wireSourceEvents(): void {
     this.source.on('loaded', () => {
@@ -359,21 +452,25 @@ export class SpheraPlayer {
     on('play', () => {
       this.stateMachine.transition('playing');
       this.ui.setPlaying(true);
+      this.syncPanel();
       this.events.emit('play', undefined);
     });
     on('pause', () => {
       if (video.ended) return;
       this.stateMachine.transition('paused');
       this.ui.setPlaying(false);
+      this.syncPanel();
       this.events.emit('pause', undefined);
     });
     on('ended', () => {
       this.stateMachine.transition('ended');
       this.ui.setPlaying(false);
+      this.syncPanel();
       this.events.emit('ended', undefined);
     });
     on('timeupdate', () => {
       this.ui.setTime(video.currentTime, video.duration || 0);
+      this.syncPanel();
       this.events.emit('timeupdate', {
         currentTime: video.currentTime,
         duration: video.duration || 0,
@@ -426,13 +523,20 @@ export class SpheraPlayer {
     this.renderer.setAnimationLoop(null);
     this.resizeObserver?.disconnect();
     document.removeEventListener('fullscreenchange', this.handleFullscreenChange);
+    this.renderer.domElement.removeEventListener('click', this.handleCanvasClick);
     for (const [type, handler] of this.videoListeners) {
       this.source.video.removeEventListener(type, handler);
     }
     this.videoListeners.length = 0;
+    for (const controller of this.controllers) {
+      this.rig.remove(controller);
+    }
+    this.controllers.length = 0;
     this.controls.dispose();
     this.gyro.dispose();
     this.xr?.dispose();
+    this.hotspots.dispose();
+    this.panel.dispose();
     this.ui.dispose();
     this.teardownProjectionGroup();
     this.texture.dispose();

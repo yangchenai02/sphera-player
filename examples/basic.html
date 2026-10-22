@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sphera Player — basic 360 example</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #111; }
+      #app { width: 100%; height: 100vh; }
+      .note {
+        position: fixed; top: 10px; left: 12px; z-index: 10;
+        color: #ddd; font: 14px/1.5 system-ui, sans-serif;
+        text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8); margin: 0;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.181.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.181.0/examples/jsm/",
+          "hls.js": "https://cdn.jsdelivr.net/npm/hls.js@1.6.15/+esm"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <p class="note">
+      Drag to look around, scroll to zoom. Play your own CORS-enabled 360 clip
+      by appending <code>?src=YOUR_VIDEO_URL</code> to this page URL.
+    </p>
+    <script type="module">
+      import { SpheraPlayer } from '../dist/sphera-player.es.js';
+
+      const params = new URLSearchParams(location.search);
+      // Replace with your own 360 clip (must be served with CORS headers).
+      const src = params.get('src') ?? 'https://cdn.example.com/your-360-video.mp4';
+
+      const player = new SpheraPlayer('#app', {
+        src,
+        projection: 'equirect360',
+        autoplay: 'muted',
+      });
+      player.on('error', (err) => console.error('[sphera]', err.code, err.message));
+    </script>
+  </body>
+</html>

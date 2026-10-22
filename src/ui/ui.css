@@ -1,0 +1,192 @@
+/* Sphera flat-mode overlay UI. All classes are sphera- prefixed: the player
+   is embedded in host pages and must never leak global styles. */
+
+.sphera-container {
+  position: relative;
+  overflow: hidden;
+  background: #000;
+}
+
+.sphera-container canvas {
+  display: block;
+}
+
+.sphera-ui {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color: #fff;
+  z-index: 5;
+}
+
+.sphera-ui button {
+  pointer-events: auto;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.sphera-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  pointer-events: auto;
+}
+
+.sphera-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  padding: 0 6px;
+}
+
+.sphera-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.sphera-btn-text {
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.sphera-btn-active {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.sphera-time {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sphera-progress {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.sphera-progress-fill {
+  height: 100%;
+  width: 0;
+  background: #ff5252;
+  border-radius: 3px;
+}
+
+.sphera-volume {
+  width: 72px;
+  accent-color: #ff5252;
+  pointer-events: auto;
+}
+
+.sphera-center-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sphera-center-btn:hover {
+  background: rgba(0, 0, 0, 0.75);
+}
+
+.sphera-center-btn svg {
+  width: 34px;
+  height: 34px;
+}
+
+.sphera-spinner {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border-radius: 50%;
+  border: 4px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  animation: sphera-spin 0.9s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes sphera-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.sphera-error {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(92%, 560px);
+  background: rgba(160, 20, 20, 0.92);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  pointer-events: auto;
+}
+
+.sphera-menu {
+  position: absolute;
+  right: 12px;
+  bottom: 56px;
+  min-width: 170px;
+  background: rgba(18, 18, 18, 0.95);
+  border-radius: 8px;
+  padding: 6px;
+  pointer-events: auto;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.sphera-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+
+.sphera-menu-item:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.sphera-menu-item-active {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* three.js VRButton, restyled to sit in the top-right corner of the player. */
+.sphera-xr-button {
+  position: absolute !important;
+  top: 12px;
+  right: 12px;
+  bottom: auto !important;
+  left: auto !important;
+  pointer-events: auto;
+  z-index: 6;
+}

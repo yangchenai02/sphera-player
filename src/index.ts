@@ -5,6 +5,8 @@ export { Emitter } from './events';
 export type { EventHandler } from './events';
 export { PlaybackStateMachine } from './state';
 export type { StateChangeListener } from './state';
+export { SourceLoader, detectSourceKind, mapMediaError } from './source';
+export type { SourceKind, SourceTypeOverride } from './source';
 export type {
   HotspotDef,
   PlaybackState,

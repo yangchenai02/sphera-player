@@ -10,6 +10,9 @@ export type { SourceKind, SourceTypeOverride } from './source';
 export { Equirect360Projection } from './projections/equirect360';
 export { createVideoSphere, disposeObjectTree, VIDEO_SPHERE_RADIUS } from './projections/base';
 export type { ProjectionStrategy, SphereOptions } from './projections/base';
+export { PointerLookControls } from './controls/pointer-look';
+export type { PointerLookOptions } from './controls/pointer-look';
+export { clampFov, clampPitch, dampVelocity, wrapAngle, MAX_FOV, MIN_FOV } from './controls/look-math';
 export type {
   HotspotDef,
   PlaybackState,

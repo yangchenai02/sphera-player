@@ -3,8 +3,12 @@ import { Emitter } from './events';
 import { PlaybackStateMachine } from './state';
 import { SourceLoader } from './source';
 import { Equirect360Projection } from './projections/equirect360';
+import { StereoProjection } from './projections/stereo';
+import { VR180Projection } from './projections/vr180';
 import type { ProjectionStrategy } from './projections/base';
 import { PointerLookControls } from './controls/pointer-look';
+import { DeviceOrientationControls } from './controls/device-orientation';
+import { XRSessionHelper } from './controls/xr-session';
 import { clampFov } from './controls/look-math';
 import { DomUI } from './ui/dom-ui';
 import type {
@@ -43,11 +47,14 @@ export class SpheraPlayer {
   private readonly stateMachine: PlaybackStateMachine;
   private readonly ui: DomUI;
   private readonly controls: PointerLookControls;
+  private readonly gyro: DeviceOrientationControls;
   private readonly clock = new THREE.Clock();
   private readonly videoListeners: Array<[string, EventListener]> = [];
   private texture: THREE.VideoTexture;
   private strategy: ProjectionStrategy;
   private projectionGroup: THREE.Group | null = null;
+  private xr: XRSessionHelper | null = null;
+  private gyroActive = false;
   private resizeObserver: ResizeObserver | null = null;
   private disposed = false;
 
@@ -92,6 +99,7 @@ export class SpheraPlayer {
     this.buildProjectionGroup();
 
     this.controls = new PointerLookControls(this.rig, this.camera, this.renderer.domElement);
+    this.gyro = new DeviceOrientationControls(this.rig);
 
     this.ui = new DomUI(container, {
       onTogglePlay: () => this.togglePlay(),
@@ -104,11 +112,12 @@ export class SpheraPlayer {
       onToggleFullscreen: () => this.toggleFullscreen(),
       onSelectProjection: (p) => this.setProjection(p),
       onSelectQuality: (i) => this.source.setQuality(i),
-      onToggleGyro: () => undefined,
+      onToggleGyro: () => void this.setGyroEnabled(!this.gyroActive),
     });
     this.ui.setProjections(ALL_PROJECTIONS, this.strategy.type);
     this.ui.setVolume(video.muted ? 0 : video.volume);
     this.ui.setPlaying(false);
+    this.ui.setGyroAvailable(DeviceOrientationControls.isSupported());
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
@@ -118,6 +127,18 @@ export class SpheraPlayer {
     this.stateMachine.transition('loading');
     this.source.attach(options.src, options.sourceType ?? 'auto');
     this.renderer.setAnimationLoop(this.tick);
+
+    if (options.gyro) {
+      void this.setGyroEnabled(true);
+    }
+    void XRSessionHelper.isVRSupported().then((supported) => {
+      if (!supported || this.disposed) return;
+      this.xr = new XRSessionHelper(this.renderer, {
+        onStart: () => this.onXRStart(),
+        onEnd: () => this.onXREnd(),
+      });
+      this.ui.appendXRButton(this.xr.button);
+    });
   }
 
   // ------------------------------------------------------------- events
@@ -180,6 +201,37 @@ export class SpheraPlayer {
     this.ui.setVolume(muted ? 0 : this.source.video.volume);
   }
 
+  // -------------------------------------------------------------- gyro
+
+  get gyroEnabled(): boolean {
+    return this.gyroActive;
+  }
+
+  /**
+   * Switch between pointer look and device-orientation look. Returns false
+   * when gyro is unavailable or the (iOS) permission request was denied.
+   */
+  async setGyroEnabled(enabled: boolean): Promise<boolean> {
+    if (enabled === this.gyroActive) return this.gyroActive;
+    if (!enabled) {
+      this.gyro.disable();
+      this.controls.enabled = true;
+      this.gyroActive = false;
+      this.ui.setGyroActive(false);
+      return true;
+    }
+    if (!DeviceOrientationControls.isSupported()) return false;
+    if (DeviceOrientationControls.needsPermission()) {
+      const granted = await DeviceOrientationControls.requestPermission();
+      if (!granted) return false;
+    }
+    this.gyro.enable();
+    this.controls.enabled = false;
+    this.gyroActive = true;
+    this.ui.setGyroActive(true);
+    return true;
+  }
+
   // ------------------------------------------------------------ queries
 
   getState(): PlaybackState {
@@ -204,6 +256,10 @@ export class SpheraPlayer {
 
   getProjection(): ProjectionType {
     return this.strategy.type;
+  }
+
+  get presenting(): boolean {
+    return this.xr?.presenting ?? false;
   }
 
   // -------------------------------------------------------- projection
@@ -232,6 +288,12 @@ export class SpheraPlayer {
     switch (type) {
       case 'equirect360':
         return new Equirect360Projection();
+      case 'equirect360-tb':
+        return new StereoProjection('equirect360-tb', 'tb');
+      case 'equirect360-sbs':
+        return new StereoProjection('equirect360-sbs', 'sbs');
+      case 'vr180':
+        return new VR180Projection();
       default:
         throw new Error(`Unsupported projection: ${type}`);
     }
@@ -239,6 +301,7 @@ export class SpheraPlayer {
 
   private buildProjectionGroup(): void {
     this.projectionGroup = this.strategy.build(this.texture);
+    this.strategy.setPresentation?.(this.camera, this.presenting ? 'xr' : 'flat');
     this.scene.add(this.projectionGroup);
   }
 
@@ -247,6 +310,18 @@ export class SpheraPlayer {
     this.scene.remove(this.projectionGroup);
     this.strategy.dispose(this.projectionGroup);
     this.projectionGroup = null;
+  }
+
+  // ---------------------------------------------------------------- XR
+
+  private onXRStart(): void {
+    this.strategy.setPresentation?.(this.camera, 'xr');
+    this.events.emit('xrstart', undefined);
+  }
+
+  private onXREnd(): void {
+    this.strategy.setPresentation?.(this.camera, 'flat');
+    this.events.emit('xrend', undefined);
   }
 
   // ------------------------------------------------------------- wiring
@@ -356,6 +431,8 @@ export class SpheraPlayer {
     }
     this.videoListeners.length = 0;
     this.controls.dispose();
+    this.gyro.dispose();
+    this.xr?.dispose();
     this.ui.dispose();
     this.teardownProjectionGroup();
     this.texture.dispose();

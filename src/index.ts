@@ -13,6 +13,8 @@ export type { ProjectionStrategy, SphereOptions } from './projections/base';
 export { PointerLookControls } from './controls/pointer-look';
 export type { PointerLookOptions } from './controls/pointer-look';
 export { clampFov, clampPitch, dampVelocity, wrapAngle, MAX_FOV, MIN_FOV } from './controls/look-math';
+export { DomUI, formatTime, PROJECTION_LABELS } from './ui/dom-ui';
+export type { DomUIHandlers } from './ui/dom-ui';
 export type {
   HotspotDef,
   PlaybackState,

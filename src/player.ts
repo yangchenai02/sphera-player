@@ -1,0 +1,369 @@
+import * as THREE from 'three';
+import { Emitter } from './events';
+import { PlaybackStateMachine } from './state';
+import { SourceLoader } from './source';
+import { Equirect360Projection } from './projections/equirect360';
+import type { ProjectionStrategy } from './projections/base';
+import { PointerLookControls } from './controls/pointer-look';
+import { clampFov } from './controls/look-math';
+import { DomUI } from './ui/dom-ui';
+import type {
+  PlaybackState,
+  PlayerEventMap,
+  ProjectionType,
+  QualityLevel,
+  SpheraError,
+  SpheraOptions,
+} from './types';
+
+const ALL_PROJECTIONS: ProjectionType[] = [
+  'equirect360',
+  'equirect360-tb',
+  'equirect360-sbs',
+  'vr180',
+];
+
+/**
+ * SpheraPlayer facade: wires the source loader, the active projection
+ * strategy, look controls and the DOM UI into one embeddable player.
+ *
+ * Scene layout: the camera sits at the origin inside a rig group (the rig
+ * carries yaw/pitch from the look controls); the projection geometry lives
+ * at the scene root, centered on the same origin.
+ */
+export class SpheraPlayer {
+  private readonly events = new Emitter<PlayerEventMap>();
+  private readonly container: HTMLElement;
+  private readonly options: SpheraOptions;
+  private readonly renderer: THREE.WebGLRenderer;
+  private readonly scene = new THREE.Scene();
+  private readonly rig = new THREE.Group();
+  private readonly camera: THREE.PerspectiveCamera;
+  private readonly source: SourceLoader;
+  private readonly stateMachine: PlaybackStateMachine;
+  private readonly ui: DomUI;
+  private readonly controls: PointerLookControls;
+  private readonly clock = new THREE.Clock();
+  private readonly videoListeners: Array<[string, EventListener]> = [];
+  private texture: THREE.VideoTexture;
+  private strategy: ProjectionStrategy;
+  private projectionGroup: THREE.Group | null = null;
+  private resizeObserver: ResizeObserver | null = null;
+  private disposed = false;
+
+  constructor(target: string | HTMLElement, options: SpheraOptions) {
+    const container =
+      typeof target === 'string' ? document.querySelector<HTMLElement>(target) : target;
+    if (!container) {
+      throw new Error(`SpheraPlayer: target not found: ${String(target)}`);
+    }
+    this.container = container;
+    this.options = options;
+    container.classList.add('sphera-container');
+
+    this.stateMachine = new PlaybackStateMachine((from, to) => {
+      this.events.emit('statechange', { from, to });
+    });
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.xr.enabled = true;
+    container.appendChild(this.renderer.domElement);
+
+    this.camera = new THREE.PerspectiveCamera(clampFov(options.fov ?? 75), 1, 0.1, 100);
+    this.rig.add(this.camera);
+    this.scene.add(this.rig);
+
+    this.source = new SourceLoader(options.crossorigin ?? 'anonymous');
+    const video = this.source.video;
+    video.muted = options.muted ?? false;
+    video.volume = options.volume ?? 1;
+    video.loop = options.loop ?? false;
+    if (options.poster) video.poster = options.poster;
+    this.wireSourceEvents();
+    this.wireVideoEvents();
+
+    this.texture = new THREE.VideoTexture(video);
+    this.texture.colorSpace = THREE.SRGBColorSpace;
+    this.texture.minFilter = THREE.LinearFilter;
+    this.texture.generateMipmaps = false;
+
+    this.strategy = this.createStrategy(options.projection ?? 'equirect360');
+    this.buildProjectionGroup();
+
+    this.controls = new PointerLookControls(this.rig, this.camera, this.renderer.domElement);
+
+    this.ui = new DomUI(container, {
+      onTogglePlay: () => this.togglePlay(),
+      onSeek: (ratio) => {
+        if (Number.isFinite(video.duration) && video.duration > 0) {
+          this.seek(ratio * video.duration);
+        }
+      },
+      onVolume: (v) => this.setVolume(v),
+      onToggleFullscreen: () => this.toggleFullscreen(),
+      onSelectProjection: (p) => this.setProjection(p),
+      onSelectQuality: (i) => this.source.setQuality(i),
+      onToggleGyro: () => undefined,
+    });
+    this.ui.setProjections(ALL_PROJECTIONS, this.strategy.type);
+    this.ui.setVolume(video.muted ? 0 : video.volume);
+    this.ui.setPlaying(false);
+
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(container);
+    document.addEventListener('fullscreenchange', this.handleFullscreenChange);
+    this.resize();
+
+    this.stateMachine.transition('loading');
+    this.source.attach(options.src, options.sourceType ?? 'auto');
+    this.renderer.setAnimationLoop(this.tick);
+  }
+
+  // ------------------------------------------------------------- events
+
+  on<K extends keyof PlayerEventMap>(
+    event: K,
+    handler: (payload: PlayerEventMap[K]) => void,
+  ): () => void {
+    return this.events.on(event, handler);
+  }
+
+  off<K extends keyof PlayerEventMap>(
+    event: K,
+    handler: (payload: PlayerEventMap[K]) => void,
+  ): void {
+    this.events.off(event, handler);
+  }
+
+  // ---------------------------------------------------------- transport
+
+  async play(): Promise<void> {
+    try {
+      await this.source.video.play();
+    } catch (cause) {
+      this.handleError({
+        code: 'PLAY_BLOCKED',
+        message: 'Playback was blocked by the browser (autoplay policy). Interact with the player to start playback.',
+        fatal: false,
+        cause,
+      });
+    }
+  }
+
+  pause(): void {
+    this.source.video.pause();
+  }
+
+  togglePlay(): void {
+    if (this.stateMachine.state === 'playing') this.pause();
+    else void this.play();
+  }
+
+  seek(timeSeconds: number): void {
+    const video = this.source.video;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const clamped = Math.min(Math.max(0, timeSeconds), duration || timeSeconds);
+    video.currentTime = clamped;
+    this.events.emit('seek', { time: clamped });
+  }
+
+  setVolume(volume: number): void {
+    const v = Math.min(1, Math.max(0, volume));
+    this.source.video.volume = v;
+    if (v > 0) this.source.video.muted = false;
+    this.ui.setVolume(v);
+  }
+
+  setMuted(muted: boolean): void {
+    this.source.video.muted = muted;
+    this.ui.setVolume(muted ? 0 : this.source.video.volume);
+  }
+
+  // ------------------------------------------------------------ queries
+
+  getState(): PlaybackState {
+    return this.stateMachine.state;
+  }
+
+  getVideoElement(): HTMLVideoElement {
+    return this.source.video;
+  }
+
+  get currentTime(): number {
+    return this.source.video.currentTime;
+  }
+
+  get duration(): number {
+    return this.source.video.duration;
+  }
+
+  getQualityLevels(): QualityLevel[] {
+    return this.source.getLevels();
+  }
+
+  getProjection(): ProjectionType {
+    return this.strategy.type;
+  }
+
+  // -------------------------------------------------------- projection
+
+  setProjection(type: ProjectionType): void {
+    if (type === this.strategy.type) return;
+    let next: ProjectionStrategy;
+    try {
+      next = this.createStrategy(type);
+    } catch {
+      this.handleError({
+        code: 'PROJECTION_NOT_SUPPORTED',
+        message: `Projection "${type}" is not supported by this build.`,
+        fatal: false,
+      });
+      return;
+    }
+    this.teardownProjectionGroup();
+    this.strategy = next;
+    this.buildProjectionGroup();
+    this.ui.setProjections(ALL_PROJECTIONS, type);
+    this.events.emit('projectionchange', { projection: type });
+  }
+
+  private createStrategy(type: ProjectionType): ProjectionStrategy {
+    switch (type) {
+      case 'equirect360':
+        return new Equirect360Projection();
+      default:
+        throw new Error(`Unsupported projection: ${type}`);
+    }
+  }
+
+  private buildProjectionGroup(): void {
+    this.projectionGroup = this.strategy.build(this.texture);
+    this.scene.add(this.projectionGroup);
+  }
+
+  private teardownProjectionGroup(): void {
+    if (!this.projectionGroup) return;
+    this.scene.remove(this.projectionGroup);
+    this.strategy.dispose(this.projectionGroup);
+    this.projectionGroup = null;
+  }
+
+  // ------------------------------------------------------------- wiring
+
+  private wireSourceEvents(): void {
+    this.source.on('loaded', () => {
+      this.stateMachine.transition('ready');
+      this.events.emit('ready', undefined);
+      const autoplay = this.options.autoplay;
+      if (autoplay === 'muted') {
+        this.source.video.muted = true;
+        this.ui.setVolume(0);
+        void this.play();
+      } else if (autoplay === true) {
+        void this.play();
+      }
+    });
+    this.source.on('levels', ({ levels }) => {
+      this.ui.setQualities(levels, this.source.quality);
+    });
+    this.source.on('levelchange', ({ index }) => {
+      const level = this.source.getLevels()[index];
+      this.ui.setQualities(this.source.getLevels(), index);
+      this.events.emit('qualitychange', { index, label: level?.label ?? 'Auto' });
+    });
+    this.source.on('error', (err) => this.handleError(err));
+  }
+
+  private wireVideoEvents(): void {
+    const video = this.source.video;
+    const on = (type: string, handler: EventListener) => {
+      video.addEventListener(type, handler);
+      this.videoListeners.push([type, handler]);
+    };
+    on('play', () => {
+      this.stateMachine.transition('playing');
+      this.ui.setPlaying(true);
+      this.events.emit('play', undefined);
+    });
+    on('pause', () => {
+      if (video.ended) return;
+      this.stateMachine.transition('paused');
+      this.ui.setPlaying(false);
+      this.events.emit('pause', undefined);
+    });
+    on('ended', () => {
+      this.stateMachine.transition('ended');
+      this.ui.setPlaying(false);
+      this.events.emit('ended', undefined);
+    });
+    on('timeupdate', () => {
+      this.ui.setTime(video.currentTime, video.duration || 0);
+      this.events.emit('timeupdate', {
+        currentTime: video.currentTime,
+        duration: video.duration || 0,
+      });
+    });
+    on('waiting', () => this.ui.setBuffering(true));
+    on('playing', () => this.ui.setBuffering(false));
+    on('canplay', () => this.ui.setBuffering(false));
+  }
+
+  private handleError(err: SpheraError): void {
+    if (err.fatal) {
+      this.stateMachine.transition('error');
+      this.ui.showError(err.message);
+      this.ui.setBuffering(false);
+    }
+    this.events.emit('error', err);
+  }
+
+  private toggleFullscreen(): void {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen();
+    } else {
+      void this.container.requestFullscreen?.();
+    }
+  }
+
+  private handleFullscreenChange = (): void => {
+    this.resize();
+  };
+
+  private resize(): void {
+    const width = this.container.clientWidth || 640;
+    const height = this.container.clientHeight || 360;
+    this.renderer.setSize(width, height);
+    this.camera.aspect = width / height;
+    this.camera.updateProjectionMatrix();
+  }
+
+  private tick = (): void => {
+    if (this.disposed) return;
+    const dt = Math.min(this.clock.getDelta(), 0.1);
+    this.controls.update(dt);
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.renderer.setAnimationLoop(null);
+    this.resizeObserver?.disconnect();
+    document.removeEventListener('fullscreenchange', this.handleFullscreenChange);
+    for (const [type, handler] of this.videoListeners) {
+      this.source.video.removeEventListener(type, handler);
+    }
+    this.videoListeners.length = 0;
+    this.controls.dispose();
+    this.ui.dispose();
+    this.teardownProjectionGroup();
+    this.texture.dispose();
+    this.source.dispose();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+    this.container.classList.remove('sphera-container');
+    this.stateMachine.reset();
+    this.events.removeAllListeners();
+  }
+}

@@ -22,6 +22,9 @@ export type { XRSessionCallbacks } from './controls/xr-session';
 export { clampFov, clampPitch, dampVelocity, wrapAngle, MAX_FOV, MIN_FOV } from './controls/look-math';
 export { DomUI, formatTime, PROJECTION_LABELS } from './ui/dom-ui';
 export type { DomUIHandlers } from './ui/dom-ui';
+export { XRPanel } from './ui/xr-panel';
+export type { XRPanelAction, XRPanelState } from './ui/xr-panel';
+export { HotspotManager, yawPitchToPosition, HOTSPOT_RADIUS } from './hotspots';
 export type {
   HotspotDef,
   PlaybackState,
